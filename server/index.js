@@ -58,6 +58,32 @@ app.post('/api/entries', (req, res) => {
   }
 });
 
+// 按模块与键查询文案：曾用键也会指向改名后的那一条
+app.get('/api/entries/resolve', (req, res) => {
+  try {
+    res.json(api.resolveEntry(api.readQuery(req.query, 'module'), api.readQuery(req.query, 'key')));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// 批量改名：先预览会得到哪些条目改成什么，确认之后再整体执行
+app.post('/api/entries/rename-preview', (req, res) => {
+  try {
+    res.json(api.previewRename(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/entries/rename', (req, res) => {
+  try {
+    res.json(api.executeRename(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.get('/api/entries/:id', (req, res) => {
   try {
     res.json(api.getEntry(req.params.id));

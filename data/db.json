@@ -70,7 +70,14 @@
       "note": "首页搜索框占位提示",
       "updatedBy": "王凯",
       "createdAt": "2026-09-08T02:20:00.000Z",
-      "updatedAt": "2026-09-15T11:05:00.000Z"
+      "updatedAt": "2026-09-15T11:05:00.000Z",
+      "previousKeys": [
+        {
+          "module": "home",
+          "key": "home.search.hint",
+          "renamedAt": "2026-09-12T08:30:00.000Z"
+        }
+      ]
     },
     {
       "id": "entry-1004",

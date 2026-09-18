@@ -11,7 +11,8 @@ const MAX_OPERATOR_LENGTH = 40;
 const UNNAMED = '未署名';
 
 // 初始数据：四种语言、四个模块的十五条文案。繁体与英语故意留了几条没译，
-// 日语整条语言处于停用状态，英语里还有一条把 {minutes} 占位符写丢了
+// 日语整条语言处于停用状态，英语里还有一条把 {minutes} 占位符写丢了，
+// 首页搜索框那条文案带着一个曾用键，用来演示改名之后旧键仍然查得到
 function seedData() {
   return {
     languages: [
@@ -62,6 +63,9 @@ function seedData() {
         updatedBy: '王凯',
         createdAt: '2026-09-08T02:20:00.000Z',
         updatedAt: '2026-09-15T11:05:00.000Z',
+        previousKeys: [
+          { module: 'home', key: 'home.search.hint', renamedAt: '2026-09-12T08:30:00.000Z' },
+        ],
       },
       {
         id: 'entry-1004',
@@ -245,6 +249,30 @@ function normalizeLanguage(item, fallbackIndex) {
   };
 }
 
+// 曾用键整理成固定结构：缺模块时按当前模块补上，与当前写法重复的、
+// 彼此重复的曾用键都只留一份
+function normalizePreviousKeys(raw, currentModule, currentKey) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const result = [];
+  raw.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const module = typeof item.module === 'string' && item.module.trim() ? item.module.trim() : currentModule;
+    const key = typeof item.key === 'string' ? item.key.trim() : '';
+    if (!key) return;
+    if (module === currentModule && key === currentKey) return;
+    const signature = `${module}\n${key}`.toLowerCase();
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    result.push({
+      module,
+      key,
+      renamedAt: typeof item.renamedAt === 'string' ? item.renamedAt : '',
+    });
+  });
+  return result;
+}
+
 // 把单条文案整理成固定结构：译文只保留字符串取值，其余一律丢弃
 function normalizeEntry(item, fallbackIndex) {
   const source = item && typeof item === 'object' ? item : {};
@@ -256,15 +284,18 @@ function normalizeEntry(item, fallbackIndex) {
       if (typeof value === 'string') translations[code] = value;
     });
   }
+  const module = typeof source.module === 'string' && source.module.trim() ? source.module.trim() : 'default';
+  const key = typeof source.key === 'string' && source.key.trim() ? source.key.trim() : `entry.restored.${fallbackIndex + 1}`;
   return {
     id: typeof source.id === 'string' && source.id ? source.id : `entry-restored-${fallbackIndex + 1}`,
-    module: typeof source.module === 'string' && source.module.trim() ? source.module.trim() : 'default',
-    key: typeof source.key === 'string' && source.key.trim() ? source.key.trim() : `entry.restored.${fallbackIndex + 1}`,
+    module,
+    key,
     translations,
     note: typeof source.note === 'string' ? source.note : '',
     updatedBy: typeof source.updatedBy === 'string' && source.updatedBy.trim() ? source.updatedBy.trim() : UNNAMED,
     createdAt,
     updatedAt: typeof source.updatedAt === 'string' && source.updatedAt ? source.updatedAt : createdAt,
+    previousKeys: normalizePreviousKeys(source.previousKeys, module, key),
   };
 }
 
@@ -341,6 +372,7 @@ module.exports = {
   normalize,
   normalizeLanguage,
   normalizeEntry,
+  normalizePreviousKeys,
   MAX_TRANSLATION_LENGTH,
   MAX_NOTE_LENGTH,
   MAX_OPERATOR_LENGTH,

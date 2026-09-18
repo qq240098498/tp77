@@ -376,3 +376,35 @@ label.full input {
   display: flex;
   gap: 10px;
 }
+
+.alias-line {
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rename-preview {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.rename-summary {
+  margin: 6px 0;
+  font-weight: 600;
+}
+
+.rename-summary.bad {
+  color: var(--danger);
+}
+
+.rename-preview .form-actions {
+  margin-top: 10px;
+}
+
+table.rename-grid {
+  min-width: 480px;
+}

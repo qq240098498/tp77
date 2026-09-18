@@ -80,14 +80,35 @@ function validateOperator(value, fallback) {
   return name;
 }
 
-// 同一个模块下不允许出现重复的键，比较时忽略大小写
+// 同一个模块下不允许出现重复的键，比较时忽略大小写。既要比别人的当前键，
+// 也要比别人的曾用键：曾用键仍然会查询到原来那条文案，被占用时指明是哪一条
 function assertKeyFree(data, module, key, selfId) {
+  const lower = key.toLowerCase();
   const hit = data.entries.find((item) => item.module === module
     && item.id !== selfId
-    && item.key.toLowerCase() === key.toLowerCase());
+    && item.key.toLowerCase() === lower);
   if (hit) {
-    throw new ApiError(409, 'KEY_DUPLICATED', `模块 ${module} 下已经有 ${hit.key} 这条文案了`, 'key');
+    throw new ApiError(409, 'KEY_DUPLICATED', `模块 ${module} 下的 ${key} 已被文案「${hit.key}」（编号 ${hit.id}）占用`, 'key');
   }
+  const aliasHit = data.entries.find((item) => item.id !== selfId
+    && (item.previousKeys || []).some((alias) => alias.module === module && alias.key.toLowerCase() === lower));
+  if (aliasHit) {
+    throw new ApiError(409, 'KEY_ALIAS_TAKEN', `模块 ${module} 下的 ${key} 是文案「${aliasHit.key}」（编号 ${aliasHit.id}）的曾用键，仍会查询到那条文案，不能重复使用`, 'key');
+  }
+}
+
+// 改名时把旧写法记进曾用键，旧键仍然可以查询到这条文案；如果新写法自己就是
+// 一条曾用键（改回旧名字），那它从现在起是正式写法，不再算曾用
+function applyRename(entry, module, key, renamedAt) {
+  if (entry.module === module && entry.key === key) return false;
+  const kept = (Array.isArray(entry.previousKeys) ? entry.previousKeys : [])
+    .filter((alias) => !(alias.module === module && alias.key === key));
+  const already = kept.some((alias) => alias.module === entry.module && alias.key === entry.key);
+  if (!already) kept.push({ module: entry.module, key: entry.key, renamedAt });
+  entry.previousKeys = kept;
+  entry.module = module;
+  entry.key = key;
+  return true;
 }
 
 function sortEntries(list) {
@@ -98,7 +119,7 @@ function sortEntries(list) {
   });
 }
 
-// 按模块与关键词筛选：关键词同时匹配文案键与任意一种语言的译文
+// 按模块与关键词筛选：关键词同时匹配文案键、曾用键与任意一种语言的译文
 function listEntries(options) {
   const input = options && typeof options === 'object' ? options : {};
   const module = pickText(input.module);
@@ -110,6 +131,10 @@ function listEntries(options) {
   if (keyword) {
     list = list.filter((item) => {
       if (item.key.toLowerCase().includes(keyword)) return true;
+      const aliases = Array.isArray(item.previousKeys) ? item.previousKeys : [];
+      const hitAlias = aliases.some((alias) => alias.key.toLowerCase().includes(keyword)
+        || alias.module.toLowerCase().includes(keyword));
+      if (hitAlias) return true;
       return Object.keys(item.translations).some((code) => item.translations[code].toLowerCase().includes(keyword));
     });
   }
@@ -150,6 +175,7 @@ function createEntry(payload) {
     updatedBy: operator,
     createdAt: now,
     updatedAt: now,
+    previousKeys: [],
   };
   data.entries.push(created);
   save(data);
@@ -171,12 +197,12 @@ function updateEntry(id, payload) {
   const operator = validateOperator(input.operator, found.updatedBy);
   assertKeyFree(data, module, key, found.id);
 
-  found.module = module;
-  found.key = key;
+  const now = new Date().toISOString();
+  applyRename(found, module, key, now);
   found.translations = translations;
   found.note = note;
   found.updatedBy = operator;
-  found.updatedAt = new Date().toISOString();
+  found.updatedAt = now;
   save(data);
   return found;
 }
@@ -190,12 +216,148 @@ function deleteEntry(id) {
   return { id: removed.id, key: removed.key };
 }
 
+// 按模块与键查询文案：先比当前写法，再比曾用键，旧键依然指向改名后的那一条
+function resolveEntry(moduleValue, keyValue) {
+  const module = pickText(moduleValue);
+  const key = pickText(keyValue);
+  if (!module) throw new ApiError(400, 'MODULE_REQUIRED', '请填写模块名', 'module');
+  if (!key) throw new ApiError(400, 'KEY_REQUIRED', '请填写文案键', 'key');
+  const data = load();
+  const lower = key.toLowerCase();
+  const current = data.entries.find((item) => item.module === module && item.key.toLowerCase() === lower);
+  if (current) return { match: 'current', requested: { module, key }, entry: current };
+  const viaAlias = data.entries.find((item) => (item.previousKeys || [])
+    .some((alias) => alias.module === module && alias.key.toLowerCase() === lower));
+  if (viaAlias) {
+    const alias = viaAlias.previousKeys.find((item) => item.module === module && item.key.toLowerCase() === lower);
+    return { match: 'alias', requested: { module, key }, alias, entry: viaAlias };
+  }
+  throw new ApiError(404, 'ENTRY_NOT_FOUND', `模块 ${module} 下没有 ${key} 这条文案，它也不是任何文案的曾用键`, '');
+}
+
+// 批量改名的替换规则：查找内容必填，替换为可以留空（表示把查到的部分删掉），
+// 模块范围留空表示全部模块；规则同时作用于模块名与文案键
+function validateRenameRule(input) {
+  const find = pickText(input.find);
+  if (!find) throw new ApiError(400, 'RENAME_FIND_REQUIRED', '请填写要查找的内容', 'find');
+  if (find.length > MAX_KEY_LENGTH) {
+    throw new ApiError(400, 'RENAME_FIND_TOO_LONG', `查找内容不能超过 ${MAX_KEY_LENGTH} 个字符`, 'find');
+  }
+  let replace = '';
+  if (input.replace !== undefined && input.replace !== null) {
+    if (typeof input.replace !== 'string') {
+      throw new ApiError(400, 'RENAME_REPLACE_INVALID', '替换为需要是文本', 'replace');
+    }
+    replace = input.replace.trim();
+    if (replace.length > MAX_KEY_LENGTH) {
+      throw new ApiError(400, 'RENAME_REPLACE_TOO_LONG', `替换为不能超过 ${MAX_KEY_LENGTH} 个字符`, 'replace');
+    }
+  }
+  const scope = pickText(input.module);
+  if (scope && !MODULE_PATTERN.test(scope)) {
+    throw new ApiError(400, 'MODULE_INVALID', '模块名要小写字母起头，后面可以跟数字与短横线，最长 30 个字符', 'renameModule');
+  }
+  return { scope, find, replace };
+}
+
+// 把规则套到候选文案上，给出每一条改名前后的对应关系；改完之后写法不合法的、
+// 撞上别人（当前键或曾用键）的、互相撞车的，都单独列进 problems
+function planRenames(data, scope, find, replace) {
+  const apply = (text) => text.split(find).join(replace);
+  const candidates = [];
+  data.entries.forEach((item) => {
+    if (scope && item.module !== scope) return;
+    const newModule = apply(item.module);
+    const newKey = apply(item.key);
+    if (newModule === item.module && newKey === item.key) return;
+    candidates.push({ id: item.id, module: item.module, key: item.key, newModule, newKey });
+  });
+
+  const changing = new Set(candidates.map((item) => item.id));
+  const targets = new Map();
+  const changes = [];
+  const problems = [];
+  candidates.forEach((change) => {
+    const lowerKey = change.newKey.toLowerCase();
+    if (!MODULE_PATTERN.test(change.newModule)) {
+      problems.push({ ...change, reason: `新模块名 ${change.newModule || '（空）'} 不符合模块的写法要求` });
+      return;
+    }
+    if (change.newKey.length > MAX_KEY_LENGTH || !KEY_PATTERN.test(change.newKey)) {
+      problems.push({ ...change, reason: `新文案键 ${change.newKey || '（空）'} 不符合文案键的写法要求` });
+      return;
+    }
+    const signature = `${change.newModule}\n${lowerKey}`;
+    const first = targets.get(signature);
+    if (first) {
+      problems.push({ ...change, reason: `与 ${first.key} 改名后的写法一模一样，两条会撞在一起` });
+      return;
+    }
+    targets.set(signature, change);
+    // 同批改名的条目会同时让出旧写法，所以只占未参与本次改名的条目的位置才算撞车
+    const occupant = data.entries.find((item) => !changing.has(item.id)
+      && item.module === change.newModule
+      && item.key.toLowerCase() === lowerKey);
+    if (occupant) {
+      problems.push({ ...change, reason: `新写法已被文案「${occupant.key}」（编号 ${occupant.id}）占用`, occupiedBy: { id: occupant.id, key: occupant.key } });
+      return;
+    }
+    const aliasOwner = data.entries.find((item) => item.id !== change.id
+      && (item.previousKeys || []).some((alias) => alias.module === change.newModule && alias.key.toLowerCase() === lowerKey));
+    if (aliasOwner) {
+      problems.push({ ...change, reason: `新写法是文案「${aliasOwner.key}」（编号 ${aliasOwner.id}）的曾用键，仍会查询到那条文案`, occupiedBy: { id: aliasOwner.id, key: aliasOwner.key } });
+      return;
+    }
+    changes.push(change);
+  });
+  return { changes, problems };
+}
+
+// 预览：把规则的作用结果原样返回，页面上给出条数与改名前后的一一对应
+function previewRename(payload) {
+  const input = payload && typeof payload === 'object' ? payload : {};
+  const rule = validateRenameRule(input);
+  const data = load();
+  const { changes, problems } = planRenames(data, rule.scope, rule.find, rule.replace);
+  return { module: rule.scope, find: rule.find, replace: rule.replace, total: changes.length, changes, problems };
+}
+
+// 确认执行：规则重新套一遍并整体校验，任何一条不成立就全部不改
+function executeRename(payload) {
+  const input = payload && typeof payload === 'object' ? payload : {};
+  const rule = validateRenameRule(input);
+  const operator = validateOperator(input.operator, UNNAMED);
+  const data = load();
+  const { changes, problems } = planRenames(data, rule.scope, rule.find, rule.replace);
+  if (problems.length) {
+    const first = problems[0];
+    throw new ApiError(409, 'RENAME_CONFLICT', `有 ${problems.length} 条文案无法按规则改名，例如 ${first.key}：${first.reason}。本次改名已整体取消`, '');
+  }
+  if (!changes.length) {
+    throw new ApiError(400, 'RENAME_EMPTY', '没有文案会被这条规则改动', 'find');
+  }
+  const now = new Date().toISOString();
+  const byId = new Map(data.entries.map((item) => [item.id, item]));
+  changes.forEach((change) => {
+    const entry = byId.get(change.id);
+    if (!entry) return;
+    applyRename(entry, change.newModule, change.newKey, now);
+    entry.updatedBy = operator;
+    entry.updatedAt = now;
+  });
+  save(data);
+  return { renamed: changes.length, changes };
+}
+
 module.exports = {
   listEntries,
   getEntry,
   createEntry,
   updateEntry,
   deleteEntry,
+  resolveEntry,
+  previewRename,
+  executeRename,
   validateModule,
   validateKey,
   validateTranslations,
