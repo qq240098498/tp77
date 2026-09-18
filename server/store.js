@@ -256,10 +256,24 @@ function normalizeEntry(item, fallbackIndex) {
       if (typeof value === 'string') translations[code] = value;
     });
   }
+  const key = typeof source.key === 'string' && source.key.trim() ? source.key.trim() : `entry.restored.${fallbackIndex + 1}`;
+  // 曾用键：改名前的旧键要留下来，忽略大小写去重，当前正在用的键不算曾用键
+  const previousKeys = [];
+  if (Array.isArray(source.previousKeys)) {
+    source.previousKeys.forEach((value) => {
+      if (typeof value !== 'string') return;
+      const oldKey = value.trim();
+      if (!oldKey) return;
+      if (oldKey.toLowerCase() === key.toLowerCase()) return;
+      if (previousKeys.some((kept) => kept.toLowerCase() === oldKey.toLowerCase())) return;
+      previousKeys.push(oldKey);
+    });
+  }
   return {
     id: typeof source.id === 'string' && source.id ? source.id : `entry-restored-${fallbackIndex + 1}`,
     module: typeof source.module === 'string' && source.module.trim() ? source.module.trim() : 'default',
-    key: typeof source.key === 'string' && source.key.trim() ? source.key.trim() : `entry.restored.${fallbackIndex + 1}`,
+    key,
+    previousKeys,
     translations,
     note: typeof source.note === 'string' ? source.note : '',
     updatedBy: typeof source.updatedBy === 'string' && source.updatedBy.trim() ? source.updatedBy.trim() : UNNAMED,

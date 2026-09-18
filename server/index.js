@@ -58,6 +58,23 @@ app.post('/api/entries', (req, res) => {
   }
 });
 
+// 批量改键：先预览条数与一一对应，操作者确认后再执行
+app.post('/api/entries/rename-preview', (req, res) => {
+  try {
+    res.json(api.previewKeyRename(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/entries/rename', (req, res) => {
+  try {
+    res.json(api.renameKeys(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.get('/api/entries/:id', (req, res) => {
   try {
     res.json(api.getEntry(req.params.id));

@@ -188,9 +188,14 @@ function renderEntries() {
       if (!value.trim()) return '<td class="missing">待翻译</td>';
       return `<td title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
     });
+    // 改名前的旧键留在键下面，旧键仍然能搜到这条文案
+    const previousKeys = Array.isArray(item.previousKeys) ? item.previousKeys : [];
+    const prevKeys = previousKeys.length
+      ? `<div class="prev-keys" title="曾用键：${escapeHtml(previousKeys.join('、'))}">曾用键：${escapeHtml(previousKeys.join('、'))}</div>`
+      : '';
     return `<tr>
       <td class="mono">${escapeHtml(item.module)}</td>
-      <td class="mono">${escapeHtml(item.key)}</td>
+      <td class="mono">${escapeHtml(item.key)}${prevKeys}</td>
       ${cells.join('')}
       <td class="note-cell">${escapeHtml(item.note)}</td>
       <td>${escapeHtml(item.updatedBy)}</td>
@@ -210,6 +215,15 @@ function openEntryForm(entry) {
   el('entry-module').value = entry ? entry.module : '';
   el('entry-key').value = entry ? entry.key : '';
   el('entry-note').value = entry ? entry.note : '';
+  const previousKeys = entry && Array.isArray(entry.previousKeys) ? entry.previousKeys : [];
+  const prevLine = el('entry-prev-keys');
+  if (previousKeys.length) {
+    prevLine.textContent = `曾用键：${previousKeys.join('、')}（改名前的旧键仍会指向这条文案）`;
+    prevLine.classList.remove('hidden');
+  } else {
+    prevLine.textContent = '';
+    prevLine.classList.add('hidden');
+  }
   el('entry-translations').innerHTML = '';
   renderTranslationInputs(entry ? entry.translations : {});
   el('entry-form').classList.remove('hidden');
@@ -275,10 +289,118 @@ async function submitEntry(event) {
   }
 }
 
+// 批量改键：先预览条数与一一对应，操作者确认之后才执行；执行时用的就是预览时的那条规则
+const renameState = { rule: null };
+
+function openRenameForm() {
+  const select = el('rename-module');
+  select.innerHTML = state.modules
+    .map((item) => `<option value="${escapeHtml(item.module)}">${escapeHtml(item.module)}（${item.count}）</option>`)
+    .join('');
+  const current = el('filter-module').value;
+  if (current && state.modules.some((item) => item.module === current)) select.value = current;
+  renameState.rule = null;
+  el('rename-preview').classList.add('hidden');
+  el('rename-preview').innerHTML = '';
+  el('rename-form').classList.remove('hidden');
+  el('rename-find').focus();
+}
+
+function closeRenameForm() {
+  renameState.rule = null;
+  el('rename-form').classList.add('hidden');
+  el('rename-preview').classList.add('hidden');
+  el('rename-preview').innerHTML = '';
+  clearFieldMarks();
+}
+
+// 批量表单的错误位置与服务端的 module/find/replace 对应到表单自己的输入项上
+function markRenameField(field) {
+  const known = { module: 'rename-module', find: 'rename-find', replace: 'rename-replace' };
+  markField(known[field] || field);
+}
+
+async function submitRenamePreview(event) {
+  event.preventDefault();
+  clearNotice();
+  clearFieldMarks();
+  const rule = {
+    module: el('rename-module').value,
+    find: el('rename-find').value,
+    replace: el('rename-replace').value,
+  };
+  try {
+    const plan = await request('/api/entries/rename-preview', { method: 'POST', body: JSON.stringify(rule) });
+    renameState.rule = rule;
+    renderRenamePreview(plan);
+  } catch (err) {
+    renameState.rule = null;
+    el('rename-preview').classList.add('hidden');
+    notify(err.message, 'error');
+    markRenameField(err.field);
+  }
+}
+
+function renderRenamePreview(plan) {
+  const box = el('rename-preview');
+  if (!plan.count) {
+    box.innerHTML = '<p class="rename-summary">这个模块下没有键里包含这段写法的文案，没有需要改名的内容</p>';
+    box.classList.remove('hidden');
+    return;
+  }
+  const rows = plan.changes.map((change) => `<tr>
+    <td class="mono">${escapeHtml(change.from)}</td>
+    <td class="mono">${escapeHtml(change.to)}</td>
+  </tr>`).join('');
+  const summary = plan.problems.length
+    ? `本次涉及 ${plan.count} 条文案的改名（模块 ${escapeHtml(plan.module)}），但有问题需要处理：`
+    : `本次将把 ${plan.count} 条文案改名（模块 ${escapeHtml(plan.module)}），改名前的旧键仍会指向各自的文案：`;
+  const problems = plan.problems.length
+    ? `<div class="rename-problems">以下 ${plan.problems.length} 条有问题，解决之前无法执行：<ul>${plan.problems.map((item) => `<li>${escapeHtml(item.message)}</li>`).join('')}</ul></div>`
+    : '';
+  const confirm = plan.problems.length
+    ? ''
+    : '<div class="form-actions"><button type="button" id="rename-confirm">确认执行</button></div>';
+  box.innerHTML = `
+    <p class="rename-summary">${summary}</p>
+    <div class="table-wrap"><table class="grid rename-grid">
+      <thead><tr><th>改名前</th><th>改名后</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    ${problems}
+    ${confirm}`;
+  box.classList.remove('hidden');
+}
+
+async function confirmRename() {
+  if (!renameState.rule) return;
+  clearNotice();
+  clearFieldMarks();
+  try {
+    const result = await request('/api/entries/rename', {
+      method: 'POST',
+      body: JSON.stringify({ ...renameState.rule, operator: currentOperator() }),
+    });
+    closeRenameForm();
+    notify(`已改名 ${result.count} 条文案，旧键仍然可以搜到`, 'ok');
+    await loadEntries();
+  } catch (err) {
+    notify(err.message, 'error');
+    markRenameField(err.field);
+  }
+}
+
+
 // 语言与文案列表上的操作用事件委托统一处理，列表重绘之后不需要重新绑定
 document.addEventListener('click', async (event) => {
   const node = event.target.closest('button');
   if (!node) return;
+
+  // 批量改键预览区里的确认按钮是动态渲染的，也走这里的委托
+  if (node.id === 'rename-confirm') {
+    confirmRename();
+    return;
+  }
 
   const code = node.dataset.languageDefault || node.dataset.languageToggle
     || node.dataset.languageRename || node.dataset.languageDelete;
@@ -336,6 +458,12 @@ document.addEventListener('click', async (event) => {
 
 el('language-form').addEventListener('submit', submitLanguage);
 el('entry-form').addEventListener('submit', submitEntry);
+el('rename-form').addEventListener('submit', submitRenamePreview);
+el('rename-open').addEventListener('click', () => {
+  clearNotice();
+  openRenameForm();
+});
+el('rename-cancel').addEventListener('click', closeRenameForm);
 el('entry-new').addEventListener('click', () => {
   clearNotice();
   openEntryForm(null);

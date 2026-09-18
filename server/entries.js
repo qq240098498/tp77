@@ -80,7 +80,8 @@ function validateOperator(value, fallback) {
   return name;
 }
 
-// 同一个模块下不允许出现重复的键，比较时忽略大小写
+// 同一个模块下不允许出现重复的键，比较时忽略大小写；
+// 其它文案改名前的旧键也算占用，因为旧键仍然指向那一条
 function assertKeyFree(data, module, key, selfId) {
   const hit = data.entries.find((item) => item.module === module
     && item.id !== selfId
@@ -88,6 +89,19 @@ function assertKeyFree(data, module, key, selfId) {
   if (hit) {
     throw new ApiError(409, 'KEY_DUPLICATED', `模块 ${module} 下已经有 ${hit.key} 这条文案了`, 'key');
   }
+  const reserved = data.entries.find((item) => item.module === module
+    && item.id !== selfId
+    && (item.previousKeys || []).some((oldKey) => oldKey.toLowerCase() === key.toLowerCase()));
+  if (reserved) {
+    throw new ApiError(409, 'KEY_RESERVED', `${key} 是 ${reserved.key} 这条文案改名前的旧键，仍然指向它，请换一个键`, 'key');
+  }
+}
+
+// 键真正变化时把旧键记到曾用键最前面；改回某个曾用键时把它从曾用键里拿掉
+function recordKeyRename(entry, oldKey) {
+  const kept = (entry.previousKeys || []).filter((item) => item.toLowerCase() !== entry.key.toLowerCase()
+    && item.toLowerCase() !== oldKey.toLowerCase());
+  entry.previousKeys = [oldKey].concat(kept);
 }
 
 function sortEntries(list) {
@@ -110,6 +124,8 @@ function listEntries(options) {
   if (keyword) {
     list = list.filter((item) => {
       if (item.key.toLowerCase().includes(keyword)) return true;
+      // 改名前的旧键也能搜到，搜出来的就是改名后的这一条
+      if ((item.previousKeys || []).some((oldKey) => oldKey.toLowerCase().includes(keyword))) return true;
       return Object.keys(item.translations).some((code) => item.translations[code].toLowerCase().includes(keyword));
     });
   }
@@ -145,6 +161,7 @@ function createEntry(payload) {
     id: crypto.randomUUID(),
     module,
     key,
+    previousKeys: [],
     translations,
     note,
     updatedBy: operator,
@@ -171,8 +188,10 @@ function updateEntry(id, payload) {
   const operator = validateOperator(input.operator, found.updatedBy);
   assertKeyFree(data, module, key, found.id);
 
+  const oldKey = found.key;
   found.module = module;
   found.key = key;
+  if (oldKey.toLowerCase() !== key.toLowerCase()) recordKeyRename(found, oldKey);
   found.translations = translations;
   found.note = note;
   found.updatedBy = operator;
@@ -190,12 +209,122 @@ function deleteEntry(id) {
   return { id: removed.id, key: removed.key };
 }
 
+// 批量改键的入参：模块必填，find 是键里要替换掉的写法，replace 允许空串（把某段删掉）
+function validateRenameRule(input) {
+  const module = validateModule(input.module);
+  const find = pickText(input.find);
+  if (!find) throw new ApiError(400, 'FIND_REQUIRED', '请填写键里要替换的写法', 'find');
+  if (find.length > MAX_KEY_LENGTH) {
+    throw new ApiError(400, 'FIND_TOO_LONG', `要替换的写法不能超过 ${MAX_KEY_LENGTH} 个字符`, 'find');
+  }
+  if (input.replace !== undefined && input.replace !== null && typeof input.replace !== 'string') {
+    throw new ApiError(400, 'REPLACE_INVALID', '替换成的内容需要是文本', 'replace');
+  }
+  const replace = pickText(input.replace);
+  if (replace.length > MAX_KEY_LENGTH) {
+    throw new ApiError(400, 'REPLACE_TOO_LONG', `替换成的内容不能超过 ${MAX_KEY_LENGTH} 个字符`, 'replace');
+  }
+  if (find === replace) {
+    throw new ApiError(400, 'RENAME_NOOP', '替换前后的写法一样，没有需要改名的文案', 'replace');
+  }
+  return { module, find, replace };
+}
+
+// 批量改键的计划：模块下键里包含 find 的文案，把 find 的所有出现处换成 replace。
+// 冲突按全部改名完成后的最终状态判定，批量内部的链式改名也能查准
+function planKeyRename(data, rule) {
+  const { module, find, replace } = rule;
+  const changes = [];
+  const problems = [];
+
+  const finalKeys = new Map();
+  data.entries.forEach((item) => finalKeys.set(item.id, item.key));
+
+  data.entries.forEach((item) => {
+    if (item.module !== module) return;
+    if (!item.key.includes(find)) return;
+    const to = item.key.split(find).join(replace);
+    if (to === item.key) return;
+    finalKeys.set(item.id, to);
+    changes.push({ id: item.id, from: item.key, to });
+  });
+
+  changes.forEach((change) => {
+    if (!change.to) {
+      problems.push({ ...change, code: 'KEY_INVALID', message: `${change.from} 改名后键就空了，请调整替换规则` });
+      return;
+    }
+    try {
+      validateKey(change.to);
+    } catch (err) {
+      problems.push({ ...change, code: err.code, message: `${change.from} 改名后会是 ${change.to}：${err.message}` });
+      return;
+    }
+    const clash = data.entries.find((item) => item.id !== change.id
+      && item.module === module
+      && finalKeys.get(item.id).toLowerCase() === change.to.toLowerCase());
+    if (clash) {
+      problems.push({ ...change, code: 'KEY_DUPLICATED', message: `${change.from} 改名后会是 ${change.to}，与模块 ${module} 下键为 ${clash.key} 的文案重复` });
+      return;
+    }
+    const reserved = data.entries.find((item) => item.id !== change.id
+      && item.module === module
+      && (item.previousKeys || []).some((oldKey) => oldKey.toLowerCase() === change.to.toLowerCase()));
+    if (reserved) {
+      problems.push({ ...change, code: 'KEY_RESERVED', message: `${change.from} 改名后会是 ${change.to}，但它是 ${reserved.key} 改名前的旧键，仍指向那一条` });
+    }
+  });
+
+  return { changes, problems };
+}
+
+// 预览：只算计划不落盘，页面据此展示条数与改名前后的一一对应
+function previewKeyRename(payload) {
+  const input = payload && typeof payload === 'object' ? payload : {};
+  const data = load();
+  const rule = validateRenameRule(input);
+  const { changes, problems } = planKeyRename(data, rule);
+  return { ...rule, count: changes.length, changes, problems };
+}
+
+// 执行：计划重算一遍，任何问题都整批拒绝，全有或全无
+function renameKeys(payload) {
+  const input = payload && typeof payload === 'object' ? payload : {};
+  const data = load();
+  const rule = validateRenameRule(input);
+  const operator = validateOperator(input.operator, UNNAMED);
+  const { changes, problems } = planKeyRename(data, rule);
+  if (problems.length) {
+    const first = problems[0];
+    const status = first.code === 'KEY_DUPLICATED' || first.code === 'KEY_RESERVED' ? 409 : 400;
+    throw new ApiError(status, first.code, `${first.message}。本次一条都没有改，请调整规则后再试`, 'replace');
+  }
+  if (!changes.length) {
+    throw new ApiError(400, 'RENAME_NO_MATCH', `模块 ${rule.module} 下没有键里包含「${rule.find}」的文案，未做任何改动`, 'find');
+  }
+
+  const now = new Date().toISOString();
+  const byId = new Map(data.entries.map((item) => [item.id, item]));
+  changes.forEach((change) => {
+    const entry = byId.get(change.id);
+    const oldKey = entry.key;
+    entry.key = change.to;
+    recordKeyRename(entry, oldKey);
+    entry.updatedBy = operator;
+    entry.updatedAt = now;
+  });
+  save(data);
+  return { ...rule, count: changes.length, changes };
+}
+
 module.exports = {
   listEntries,
   getEntry,
   createEntry,
   updateEntry,
   deleteEntry,
+  previewKeyRename,
+  renameKeys,
   validateModule,
   validateKey,
   validateTranslations,

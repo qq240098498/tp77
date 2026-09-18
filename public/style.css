@@ -376,3 +376,53 @@ label.full input {
   display: flex;
   gap: 10px;
 }
+
+/* 曾用键：列表里跟在键下面，浅色小字，太长时省略、完整内容放在悬停提示里 */
+.prev-keys {
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prev-keys-line {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+/* 批量改键的预览区：条数说明、改名前后对照、问题清单 */
+.rename-preview {
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rename-summary {
+  margin: 0;
+  font-weight: 600;
+}
+
+.rename-grid {
+  min-width: 0;
+}
+
+.rename-grid td {
+  white-space: normal;
+  word-break: break-all;
+}
+
+.rename-problems {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.rename-problems ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
